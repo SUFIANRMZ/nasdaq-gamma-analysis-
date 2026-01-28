@@ -1,123 +1,72 @@
-"""
-Script para coletar dados de opções da API Alpha Vantage.
-Salva os dados brutos em formato JSON para processamento posterior.
-"""
-
 import os
-import sys
 import json
 import requests
 from datetime import datetime
-from dotenv import load_dotenv
 
-# Carregar variáveis de ambiente
-load_dotenv()
+SYMBOL = os.getenv("TARGET_SYMBOL", "QQQ")
+TOKEN = os.getenv("TRADIER_ACCESS_TOKEN")
 
-# Configurações
-API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY', 'demo')
-BASE_URL = 'https://www.alphavantage.co/query'
+if not TOKEN:
+    raise SystemExit("❌ TRADIER_ACCESS_TOKEN ما كاينش فـ secrets")
 
-def fetch_options_data(symbol, date=None):
-    """
-    Busca dados de opções da API Alpha Vantage.
-    
-    Args:
-        symbol (str): Símbolo do ativo (ex: 'QQQ' para Nasdaq-100 ETF)
-        date (str): Data no formato YYYY-MM-DD (opcional)
-    
-    Returns:
-        dict: Dados brutos da API
-    """
-    params = {
-        'function': 'HISTORICAL_OPTIONS',
-        'symbol': symbol,
-        'apikey': API_KEY
-    }
-    
-    if date:
-        params['date'] = date
-    
-    print(f"Buscando dados de opções para {symbol}...")
-    
-    try:
-        response = requests.get(BASE_URL, params=params, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        
-        # Verificar se há erro na resposta
-        if 'Error Message' in data:
-            print(f"Erro da API: {data['Error Message']}")
-            return None
-        
-        if 'Note' in data:
-            print(f"Aviso da API: {data['Note']}")
-            return None
-            
-        print(f"Dados coletados com sucesso!")
-        return data
-        
-    except requests.exceptions.RequestException as e:
-        print(f"Erro ao fazer requisição: {e}")
-        return None
+BASE_URL = "https://api.tradier.com/v1"
+HEADERS = {
+    "Authorization": f"Bearer {TOKEN}",
+    "Accept": "application/json"
+}
 
-def save_raw_data(data, symbol):
-    """
-    Salva os dados brutos em arquivo JSON.
-    
-    Args:
-        data (dict): Dados da API
-        symbol (str): Símbolo do ativo
-    """
-    if not data:
-        print("Nenhum dado para salvar.")
-        return False
-    
-    # Criar diretório se não existir
-    os.makedirs('data/raw', exist_ok=True)
-    
-    # Nome do arquivo com timestamp
-    today = datetime.now().strftime('%Y-%m-%d')
-    filename = f"data/raw/{today}_{symbol}.json"
-    
-    try:
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        
-        print(f"Dados salvos em: {filename}")
-        return True
-        
-    except Exception as e:
-        print(f"Erro ao salvar arquivo: {e}")
-        return False
+def get_expirations(symbol):
+    url = f"{BASE_URL}/markets/options/expirations"
+    r = requests.get(url, headers=HEADERS, params={
+        "symbol": symbol,
+        "includeAllRoots": "true"
+    })
+    r.raise_for_status()
+    data = r.json()
+    dates = data.get("expirations", {}).get("date", [])
+    if isinstance(dates, str):
+        dates = [dates]
+    return dates
+
+def get_chain(symbol, expiration):
+    url = f"{BASE_URL}/markets/options/chains"
+    r = requests.get(url, headers=HEADERS, params={
+        "symbol": symbol,
+        "expiration": expiration,
+        "greeks": "true"
+    })
+    r.raise_for_status()
+    return r.json().get("options", {}).get("option", [])
 
 def main():
-    """
-    Função principal do script.
-    """
-    # Símbolo padrão: QQQ (ETF que rastreia o Nasdaq-100)
-    # Pode ser alterado para SPY (S&P 500) ou outros
-    symbol = os.getenv('TARGET_SYMBOL', 'QQQ')
-    
-    print(f"=== Coletor de Dados de Opções ===")
-    print(f"Símbolo: {symbol}")
-    print(f"Data/Hora: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print()
-    
-    # Buscar dados
-    data = fetch_options_data(symbol)
-    
-    # Salvar dados
-    if data:
-        success = save_raw_data(data, symbol)
-        if success:
-            print("\n✓ Coleta concluída com sucesso!")
-            sys.exit(0)
-        else:
-            print("\n✗ Falha ao salvar dados.")
-            sys.exit(1)
-    else:
-        print("\n✗ Falha ao coletar dados.")
-        sys.exit(1)
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    out_dir = "data/raw"
+    os.makedirs(out_dir, exist_ok=True)
 
-if __name__ == '__main__':
+    print(f"📥 Collecting options data for {SYMBOL}")
+
+    expirations = get_expirations(SYMBOL)
+    all_options = []
+
+    for exp in expirations[:5]:  # خليه 5 باش ما تضربش limit
+        chain = get_chain(SYMBOL, exp)
+        if chain:
+            all_options.extend(chain)
+
+    if not all_options:
+        raise SystemExit("❌ ما تجبد حتى option")
+
+    output = {
+        "symbol": SYMBOL,
+        "date": today,
+        "options": all_options
+    }
+
+    path = f"{out_dir}/{today}_{SYMBOL}.json"
+    with open(path, "w") as f:
+        json.dump(output, f, indent=2)
+
+    print(f"✅ Saved {len(all_options)} options → {path}")
+
+if __name__ == "__main__":
     main()
